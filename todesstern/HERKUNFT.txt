@@ -1,0 +1,2 @@
+three.js (MIT, Lizenz in three/LICENSE) und das Modell des Todessterns (GLB, meshopt + KTX2).
+Das Modell wird zur Laufzeit geladen (src/welt/zeichnen/todesternModell.ts); three.js zeichnet es in eine Textur auf dem gemeinsamen WebGPU-Geraet der Welt.
