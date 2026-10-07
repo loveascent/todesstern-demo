@@ -39,7 +39,9 @@ function fleckTextur() {
 }
 
 export function erzeugeStrahl(sockel, params = {}) {
-	const P = { ...STRAHL_STANDARD, ...params };
+	// Das übergebene Objekt selbst wird benutzt (Standardwerte werden darin ergänzt): Der Editor ändert es, der Strahl liest es jedes Bild.
+	// (Früher eine Kopie – dann hatten die Regler keine Wirkung.)
+	const P = Object.assign(params, { ...STRAHL_STANDARD, ...params });
 	const uPx = uniform(0.001), uMin = uniform(1.6);
 	const schichten = SCHICHTEN.map((S) => {
 		const uR = uniform(S.r), uF = uniform(new THREE.Color()), uSt = uniform(0), uProf = uniform(2.0);

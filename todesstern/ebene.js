@@ -17,10 +17,10 @@ import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { ladeTodesstern, szeneEinrichten, ladeLut, LUT, STUFEN, ABGLEICH } from './todesstern.js';
 import { erzeugeStrahl, STRAHL_STANDARD } from './strahl.js';
 import { erzeugeAustritt } from './austritt.js';
-import { erzeugeJaeger } from './jaeger.js';
+import { erzeugeJaeger, JAEGER_STANDARD } from './jaeger.js';
 
 let HUELLE = 6.65;                       // Radius der Hülle der Station in Modelleinheiten (aus dem Modell gemessen)
-export { STRAHL_STANDARD };
+export { STRAHL_STANDARD, JAEGER_STANDARD };
 
 const Y = new THREE.Vector3(0, 1, 0), Zax = new THREE.Vector3(0, 0, 1);
 
@@ -50,7 +50,7 @@ function ausrichtung(d, q) {
 	return q.setFromAxisAngle(d, ang).multiply(q1);
 }
 
-export async function erstelleEbene({ basis, container, stufe = 'niedrig', dpr = 1, msaa = 1, strahlParameter = {} }) {
+export async function erstelleEbene({ basis, container, stufe = 'niedrig', dpr = 1, msaa = 1, strahlParameter = {}, jaegerParameter = {} }) {
 	let S = STUFEN[stufe] ?? STUFEN.niedrig;
 	const renderer = new THREE.WebGPURenderer({ antialias: false, alpha: true, powerPreference: 'high-performance' });
 	await renderer.init();
@@ -62,14 +62,14 @@ export async function erstelleEbene({ basis, container, stufe = 'niedrig', dpr =
 	container.appendChild(cv);
 
 	const scene = new THREE.Scene();
-	const kamera = new THREE.PerspectiveCamera(30, 1.6, 0.2, 8e5);
+	const kamera = new THREE.PerspectiveCamera(30, 1.6, 0.03, 8e5);   // nah genug, dass Jäger im Abstand von Metern nicht abgeschnitten werden (1 Einheit = 0,6 km)
 	const W = new THREE.Group(); W.matrixAutoUpdate = false; scene.add(W);
 	const lichtFolgt = szeneEinrichten(scene, kamera, { basis, stufe, renderer, ohneHimmel: true });
 	const keys = scene.children.filter((o) => o.isDirectionalLight);
 	const lutTex = await ladeLut(basis);
 
 	let ts = null, strahl = null, austritt = null, pipeline = null, szenePass = null, aktStufe = stufe;
-	const jaeger = erzeugeJaeger(W, { anzahl: 7 });
+	const jaeger = erzeugeJaeger(W, { anzahl: 7, parameter: jaegerParameter });
 	const strahlParams = { ...STRAHL_STANDARD, ...strahlParameter };
 
 	let breite = 0, hoehe = 0;
@@ -85,9 +85,30 @@ export async function erstelleEbene({ basis, container, stufe = 'niedrig', dpr =
 		neu.gruppe.visible = false;
 		return neu;
 	}
+	let waermt = false;
+	/** Alles sichtbar machen, den Pass asynchron übersetzen, einmal echt zeichnen (Texturen, Bindungen, Nachbearbeitung), dann alles zurücksetzen */
+	async function waermen(neuPass) {
+		waermt = true;
+		const alt = new Map();
+		const sichtbarkeit = cv.style.visibility;
+		cv.style.visibility = 'hidden';
+		try {
+			scene.traverse((o) => { if (o.isLight || o === scene) return; alt.set(o, [o.visible, o.frustumCulled]); o.visible = true; o.frustumCulled = false; });
+			scene.updateMatrixWorld(true);
+			pipeline.render();                                   // erst einmal echt zeichnen: legt Zielgrößen und Nachbearbeitung an, bevor übersetzt wird
+			try { await neuPass.compileAsync(renderer); } catch (e) { console.warn('Vorübersetzen:', e); }
+			pipeline.render();
+			await renderer.backend?.device?.queue?.onSubmittedWorkDone?.();
+		} catch (e) { console.warn('Vorwärmen:', e); }
+		finally {
+			for (const [o, [vis, fc]] of alt) { o.visible = vis; o.frustumCulled = fc; }
+			cv.style.visibility = sichtbarkeit;
+			waermt = false;
+		}
+	}
 	/** Modell einsetzen: Szene, Strahl, Nachbearbeitung (Glanz und Farbtabelle der Stufe) */
 	async function setzeEin(neu, neueStufe) {
-		S = STUFEN[neueStufe] ?? STUFEN.niedrig; aktStufe = neueStufe;
+		S = STUFEN[neueStufe] ?? STUFEN.niedrig;
 		const alt = ts, altStrahl = strahl;
 		scene.add(neu.gruppe);
 		neu.gruppe.updateMatrixWorld(true);
@@ -106,13 +127,16 @@ export async function erstelleEbene({ basis, container, stufe = 'niedrig', dpr =
 		const al = clamp(max(farbe.a, max(c.r, max(c.g, c.b))), 0, 1);
 		groesse();
 		kamera.aspect = breite / hoehe; kamera.updateProjectionMatrix();
-		neu.gruppe.visible = true;
-		await renderer.compileAsync(scene, kamera);       // Shader übersetzen, solange das neue Modell noch unsichtbar im Ursprung steht (kein Ruckeln im Lauf)
-		neu.gruppe.visible = false;
 		if (!pipeline) pipeline = new THREE.RenderPipeline(renderer);
 		pipeline.outputColorTransform = false;
 		pipeline.outputNode = vec4(c.rgb, al);
 		pipeline.needsUpdate = true;
+		// Vorwärmen: JEDES Teil (Station, Strahl, Austritt, Jäger, Schweife) einmal im echten Zeichenweg zeichnen, solange es noch niemand sieht.
+		// Three.js übersetzt Shader und lädt Texturen erst beim ersten Zeichnen eines sichtbaren Objekts – ohne das hakte die Seite beim Start,
+		// bei der Ankunft der Station und beim ersten Schuss (gemessen: 100–600 ms, auch auf der RTX 5080).
+		await waermen(neuPass);
+		neu.gruppe.visible = true; neu.gruppe.scale.setScalar(1e-6);   // bleibt „sichtbar“ (siehe `zeichne`)
+		aktStufe = neueStufe;
 		szenePass = neuPass;
 		ts = neu; strahl = neuerStrahl;
 		if (alt) { scene.remove(alt.gruppe); altStrahl?.dispose(); alt.dispose?.(); }
@@ -127,8 +151,30 @@ export async function erstelleEbene({ basis, container, stufe = 'niedrig', dpr =
 	let schnell = 1.25;
 	let wartend = null, ladeLaeuft = false;    // Hochstufen im Hintergrund: fertig geladenes Modell wartet auf einen ruhigen Moment
 
-	return {
-		get bereit() { return !!ts && !!pipeline; },
+	let probe = false;
+	/**
+	 * Probelauf: die Szene einmal unsichtbar durchspielen (nur Jäger → Ankunft → Schuss) – über denselben Weg wie später, mit denselben Lichtern und Zuständen.
+	 * Three.js übersetzt Shader beim ersten Zeichnen jeder Kombination aus Objekt, Material und Lichtern; so sind alle Kombinationen übersetzt, bevor jemand „Start“ drückt
+	 * (sonst hängt die Seite bei der Ankunft der Station und beim Schuss kurz, auf Handys deutlich).
+	 */
+	async function probelauf() {
+		probe = true;
+		try {
+			const frame = () => new Promise((r) => setTimeout(r, 0));
+			const b = { vor: [0, 0, -1], rechts: [1, 0, 0], oben: [0, 1, 0], fov: 0.75, sonne: [0.5, 0.3, 0.8], halte: false, tauschOk: false };
+			const st = (t, strahl = 0, sichtbar = true) => ({ sichtbar, p: [0, 0, -0.012], R: 0.004, ziel: [1, 0, 0], austritt: t, strahlLaenge: strahl });
+			jaeger.starte({ einheitKm: 0.6, seite: 1 });
+			for (let i = 0; i < 8; i++) { api.zeichne({ ...b, zeit: 0, dt: 0.05, station: st(-1, 0, false) }); await frame(); }          // nur Jäger und Schweife
+			for (let i = 0; i < 4; i++) { api.zeichne({ ...b, zeit: 0, dt: 0.016, station: st(0.03 * i) }); await frame(); }              // Ankunft aus dem Hyperraum
+			ts.feuer(0);
+			for (const fs of [60, 120, 220, 260]) { api.zeichne({ ...b, zeit: fs / 30 / schnell, dt: 0.016, station: st(2, 50) }); await frame(); }   // Aufladung und Strahl
+			api.zeichne({ ...b, zeit: 600 / 30 / schnell, dt: 0.016, station: st(2, 50) });                                              // Schuss zu Ende: zurücksetzen
+		} catch (e) { console.warn('Probelauf:', e); }
+		finally { jaeger.stoppe(); austritt?.update(-1, pos); probe = false; }
+	}
+
+	const api = {
+		get bereit() { return !!ts && !!pipeline && !probe; },
 		get stufe() { return aktStufe; },
 		parameter: strahlParams,
 		get schussBild() { return ts && ts.schiesst ? (ts.zustand.fs ?? 1) : -1; },
@@ -147,6 +193,11 @@ export async function erstelleEbene({ basis, container, stufe = 'niedrig', dpr =
 			try { const m = await ladeModell(neueStufe); wartend = { m, stufe: neueStufe }; } finally { ladeLaeuft = false; }
 		},
 		jaegerStart(opt) { jaeger.starte(opt); },
+		jaegerStopp() { jaeger.stoppe(); },
+		/** Einstellungen der Staffel (live änderbar) und ihr Zustand für die Prüfung */
+		jaegerParameter: jaeger.parameter,
+		get jaegerStand() { return jaeger.stand; },
+		get jaegerEndeNatuerlich() { return jaeger.endeNatuerlich; },
 		jaegerAktiv() { return jaeger.aktiv; },
 		/** Schuss der Station auslösen (Klappen, Aufladung, Strahl) – zeit in Sekunden der Bildschleife */
 		feuer(zeit) { if (ts) ts.feuer(zeit * schnell); },
@@ -156,16 +207,21 @@ export async function erstelleEbene({ basis, container, stufe = 'niedrig', dpr =
 		 *      halte }
 		 */
 		zeichne(z) {
-			if (!ts || !pipeline) return;
-			// ein fertig geladenes Modell einsetzen, wenn die Station nicht schießt
-			if (wartend && !ts.schiesst) { const w = wartend; wartend = null; setzeEin(w.m, w.stufe).catch((e) => console.error('Station tauschen:', e)); }
+			if (!ts || !pipeline || waermt) return;
+			// ein fertig geladenes Modell einsetzen, wenn die Station nicht schießt und der Aufrufer es erlaubt (nie mitten in der Szene)
+			if (wartend && !ts.schiesst && !probe && z.tauschOk !== false) {
+				// Tausch: in diesem Bild wird nichts mehr gezeichnet (sonst läuft ein Bild mit der halb getauschten Nachbearbeitung), danach Probelauf
+				const w = wartend; wartend = null; waermt = true;
+				setzeEin(w.m, w.stufe).then(() => probelauf()).catch((e) => console.error('Station tauschen:', e)).finally(() => { waermt = false; });
+				return;
+			}
 			groesse();
 			const st = z.station;
 			const t = st?.austritt ?? -1;
 			const zeigeStation = !!st?.sichtbar && t >= 0;
 			const zeigeJaeger = jaeger.aktiv;
-			cv.style.visibility = zeigeStation || zeigeJaeger ? 'visible' : 'hidden';
-			if (!zeigeStation && !zeigeJaeger) { ts.gruppe.visible = false; austritt?.update(-1, pos); return; }
+			cv.style.visibility = (zeigeStation || zeigeJaeger) && !probe ? 'visible' : 'hidden';
+			if (!zeigeStation && !zeigeJaeger) { austritt?.update(-1, pos); return; }
 
 			const s = (st?.R ?? 0.004) / HUELLE;                          // Welt-Einheiten je Modelleinheit
 			pos.set(st.p[0], st.p[1], st.p[2]).divideScalar(s);
@@ -190,8 +246,10 @@ export async function erstelleEbene({ basis, container, stufe = 'niedrig', dpr =
 			const hohePx = hoehe * renderer.getPixelRatio();
 			const pxWelt = 2 * Math.tan(z.fov / 2) / hohePx;
 			const ersch = austritt ? austritt.erscheinen(t) : { sichtbar: true, skala: 1 };
-			ts.gruppe.visible = zeigeStation && ersch.sichtbar;
-			ts.gruppe.scale.copy(skal.setScalar(ersch.skala));
+			// Die Gruppe bleibt immer „sichtbar“ (nur winzig, wenn die Station nicht da ist): Ihre Lichter gehören zur Lichtermenge der Szene, und jede Änderung dieser
+			// Menge lässt Three.js alle Materialien neu übersetzen (gemessen: 60 ms Hänger bei der Ankunft der Station).
+			ts.gruppe.visible = true;
+			ts.gruppe.scale.copy(skal.setScalar(zeigeStation && ersch.sichtbar ? ersch.skala : 1e-6));
 			ts.zustand.halte = !!z.halte;
 			if (zeigeStation) {
 				ts.update(z.zeit * schnell, kamera, hohePx);
@@ -205,4 +263,17 @@ export async function erstelleEbene({ basis, container, stufe = 'niedrig', dpr =
 		},
 		dispose() { jaeger.dispose(); austritt?.dispose(); strahl?.dispose(); ts?.dispose?.(); renderer.dispose(); cv.remove(); },
 	};
+	// Eigene Jäger-Modelle (GLB aus Blender), falls neben der Station abgelegt: jaeger_<stufe>.glb oder jaeger.glb; sonst bleibt das einfache Low-Poly-Schiff
+	try {
+		for (const name of [`jaeger_${stufe}.glb`, 'jaeger.glb']) {
+			const url = basis + name;
+			if (!(await fetch(url, { method: 'HEAD' })).ok) continue;
+			const { GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js');
+			const gltf = await new GLTFLoader().loadAsync(url);
+			jaeger.setzeModell(gltf.scene); additivOhneAlpha(scene);
+			break;
+		}
+	} catch (e) { console.warn('Jäger-Modell:', e); }
+	await probelauf();
+	return api;
 }
