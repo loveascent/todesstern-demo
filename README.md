@@ -4,9 +4,9 @@ Ein Todesstern über einem Gasriesen oder Gesteinsplaneten, berechnet statt gema
 
 ## ▶ Jetzt starten (ohne Installation)
 
-**[Sonnensystem mit Todesstern, freie Kamera](https://loveascent.github.io/todesstern-demo/index.html?body=welt)** – einen Mond anklicken, rechts im Menü *Todesstern (Laserschnitt)* öffnen und starten: der Laser schneidet den Mond physikalisch (Wärme, Abtrag, Bruch) in zwei Hälften. Die Monde sind die neuen Mond-Planeten, jeder Körper hat sein eigenes Seed (Menü *Körper-Seed*).
+**[Todesstern-Simulator starten](https://loveascent.github.io/todesstern-demo/index.html?body=todesstern)**
 
-**[Todesstern-Szene als Film](https://loveascent.github.io/todesstern-demo/index.html?body=todesstern)** – feste Regie, unten in der Leiste auf **Start** klicken.
+Dort unten in der Leiste auf **Start** klicken.
 
 | Schalter | Wirkung |
 |---|---|
